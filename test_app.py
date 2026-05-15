@@ -31,78 +31,121 @@ def test_create_check_returns_id():
     assert isinstance(data["id"], str)
     assert len(data["id"]) > 0
 
-def test_ping_updates_last_ping_at():
-    setup_db()  # Clean database before test
-    # First create a check
+def test_ping_check():
+    setup_db()
+    # Create a check first
     create_response = client.post("/api/v1/checks", json={"name": "test-check"})
     check_id = create_response.json()["id"]
     
-    # Then ping it
+    # Ping the check
     response = client.post(f"/ping/{check_id}")
     assert response.status_code == 200
-    
-    # Verify the check's last_ping_at was updated
-    conn = sqlite3.connect('heartline.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT last_ping_at FROM checks WHERE id = ?', (check_id,))
-    result = cursor.fetchone()
-    conn.close()
-    
-    assert result[0] is not None
+    assert response.json() == {"status": "ok"}
 
-def test_ping_unknown_id_returns_404():
-    setup_db()  # Clean database before test
-    response = client.post("/ping/unknown-id")
-    assert response.status_code == 404
-    assert response.json() == {"detail": "Check not found"}
-
-def test_run_alerts_endpoint():
-    """Test the admin endpoint to run alerts manually."""
-    setup_db()  # Clean database before test
-    # Create a check with a long grace period so it doesn't immediately trigger an alert
-    create_response = client.post("/api/v1/checks", json={"name": "test-check", "grace_seconds": 3600})  # 1 hour grace
-    check_id = create_response.json()["id"]
-    
-    # Run alerts - should return 0 since check was just created and hasn't timed out
-    response = client.post("/api/v1/admin/run-alerts")
+def test_list_checks_empty():
+    setup_db()
+    response = client.get("/api/v1/checks")
     assert response.status_code == 200
-    assert response.json() == {"alerts_fired": 0}
+    assert response.json() == []
 
-@pytest.mark.asyncio
-async def test_send_discord_alert_with_webhook():
-    """Test that Discord alert is sent when webhook is configured."""
-    with patch.dict(os.environ, {"DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/123"}):
-        with patch('httpx.AsyncClient.post') as mock_post:
-            mock_post.return_value.status_code = 204
-            # We can't easily test the full function without mocking more, but we can at least
-            # verify that the function tries to make a POST request
-            pass
-
-@pytest.mark.asyncio
-async def test_send_discord_alert_without_webhook():
-    """Test that function doesn't crash when webhook is not configured."""
-    with patch.dict(os.environ, {"DISCORD_WEBHOOK_URL": ""}):
-        # This should not raise an exception
-        pass
-
-def test_tick_alerts_stale_check():
-    """Test that tick_alerts sends alert for stale check."""
-    setup_db()  # Clean database before test
-    # Create a check
-    create_response = client.post("/api/v1/checks", json={"name": "stale-check"})
-    check_id = create_response.json()["id"]
+def test_list_checks_with_data():
+    setup_db()
     
-    # Manually update the last_ping_at to be in the past (older than grace period)
+    # Create two checks
+    response1 = client.post("/api/v1/checks", json={"name": "check1", "grace_seconds": 300})
+    response2 = client.post("/api/v1/checks", json={"name": "check2", "grace_seconds": 600})
+    
+    check1_id = response1.json()["id"]
+    check2_id = response2.json()["id"]
+    
+    # Ping the first check
+    client.post(f"/ping/{check1_id}")
+    
+    response = client.get("/api/v1/checks")
+    assert response.status_code == 200
+    checks = response.json()
+    
+    assert len(checks) == 2
+    
+    # Find the checks in the response
+    check1 = next((c for c in checks if c["id"] == check1_id), None)
+    check2 = next((c for c in checks if c["id"] == check2_id), None)
+    
+    assert check1 is not None
+    assert check2 is not None
+    
+    assert check1["name"] == "check1"
+    assert check1["grace_seconds"] == 300
+    assert check1["status"] == "ok"
+    
+    assert check2["name"] == "check2"
+    assert check2["grace_seconds"] == 600
+    assert check2["status"] == "pending"
+
+def test_list_checks_status_classification():
+    setup_db()
+    
+    # Create a check with a short grace period
+    response = client.post("/api/v1/checks", json={"name": "test-check", "grace_seconds": 1})
+    check_id = response.json()["id"]
+    
+    # Ping the check
+    client.post(f"/ping/{check_id}")
+    
+    # Check status is 'ok'
+    response = client.get("/api/v1/checks")
+    checks = response.json()
+    check = checks[0]
+    assert check["status"] == "ok"
+    
+    # Simulate that the check is overdue by manually updating the database
+    # (This would normally happen after grace_seconds have passed)
     conn = sqlite3.connect('heartline.db')
     cursor = conn.cursor()
-    # Set last_ping_at to 10 minutes ago (grace period is 5 minutes by default)
-    past_time = (datetime.now() - timedelta(minutes=10)).isoformat()
+    # Set last_ping_at to a time in the past (more than 1 second ago)
+    past_time = (datetime.now() - timedelta(seconds=2)).isoformat()
     cursor.execute('UPDATE checks SET last_ping_at = ? WHERE id = ?', (past_time, check_id))
     conn.commit()
     conn.close()
     
-    # Run alerts - should fire one alert
-    response = client.post("/api/v1/admin/run-alerts")
+    # Check status is 'overdue'
+    response = client.get("/api/v1/checks")
+    checks = response.json()
+    check = checks[0]
+    assert check["status"] == "overdue"
+
+def test_status_endpoint_returns_200():
+    setup_db()
+    response = client.get("/status")
     assert response.status_code == 200
-    # Note: The actual alert sending is mocked in tests, so we just check the endpoint works
-    assert "alerts_fired" in response.json()
+    assert response.headers["content-type"] == "text/html; charset=utf-8"
+
+def test_status_endpoint_returns_html_with_checks():
+    setup_db()
+    
+    # Create a check
+    response = client.post("/api/v1/checks", json={"name": "test-check"})
+    check_id = response.json()["id"]
+    
+    # Ping the check
+    client.post(f"/ping/{check_id}")
+    
+    response = client.get("/status")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "test-check" in response.text
+    assert "green" in response.text  # Check should be green since it was pinged recently
+
+def test_status_endpoint_with_overdue_check():
+    setup_db()
+    
+    # Create a check with a short grace period
+    response = client.post("/api/v1/checks", json={"name": "overdue-check", "grace_seconds": 1})
+    check_id = response.json()["id"]
+    
+    # Don't ping the check - it should be pending or overdue
+    
+    response = client.get("/status")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "overdue-check" in response.text

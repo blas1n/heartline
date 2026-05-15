@@ -1,2 +1,5 @@
-# heartline
-Healthcheck / dead-man's switch service for indie devs — built autonomously via BSNexus dogfooding loop
+# Heartline
+
+Heartline is a healthcheck/dead-man's-switch SaaS for indie devs.
+
+This is the first scaffold step for the Heartline service.

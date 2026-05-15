@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  heartline:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
+    volumes:
+      - ./heartline.db:/app/heartline.db
+    env_file:
+      - .env

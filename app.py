@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 import uuid
@@ -7,6 +7,7 @@ from typing import Optional
 import os
 import logging
 import httpx
+from fastapi.responses import HTMLResponse
 
 app = FastAPI()
 
@@ -45,6 +46,13 @@ class Check(BaseModel):
     name: str
     grace_seconds: int
     last_ping_at: Optional[datetime]
+
+class CheckListResponse(BaseModel):
+    id: str
+    name: str
+    grace_seconds: int
+    last_ping_at: Optional[datetime]
+    status: str
 
 # Alert functions
 async def send_discord_alert(check_name: str):
@@ -128,6 +136,96 @@ def ping_check(check_id: str):
         raise HTTPException(status_code=404, detail="Check not found")
     
     return {"status": "ok"}
+
+@app.get("/api/v1/checks")
+def list_checks():
+    conn = sqlite3.connect('heartline.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT id, name, grace_seconds, last_ping_at FROM checks')
+    checks = cursor.fetchall()
+    conn.close()
+    
+    result = []
+    now = datetime.now()
+    
+    for check_id, name, grace_seconds, last_ping_at in checks:
+        # Determine status
+        if last_ping_at is None:
+            status = "pending"
+        else:
+            last_ping_time = datetime.fromisoformat(last_ping_at)
+            grace_period = timedelta(seconds=grace_seconds)
+            if now - last_ping_time <= grace_period:
+                status = "ok"
+            else:
+                status = "overdue"
+        
+        result.append({
+            "id": check_id,
+            "name": name,
+            "grace_seconds": grace_seconds,
+            "last_ping_at": last_ping_at,
+            "status": status
+        })
+    
+    return result
+
+@app.get("/status")
+def public_status():
+    conn = sqlite3.connect('heartline.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT id, name, grace_seconds, last_ping_at FROM checks')
+    checks = cursor.fetchall()
+    conn.close()
+    
+    now = datetime.now()
+    
+    # Build HTML content
+    html_content = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Heartline Status</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .check { display: flex; align-items: center; margin-bottom: 10px; }
+        .status-dot { width: 12px; height: 12px; border-radius: 50%; margin-right: 10px; }
+        .ok { background-color: green; }
+        .overdue { background-color: red; }
+        .pending { background-color: gray; }
+        h1 { color: #333; }
+    </style>
+</head>
+<body>
+    <h1>Heartline Status</h1>
+"""
+    
+    for check_id, name, grace_seconds, last_ping_at in checks:
+        # Determine status
+        if last_ping_at is None:
+            status = "pending"
+        else:
+            last_ping_time = datetime.fromisoformat(last_ping_at)
+            grace_period = timedelta(seconds=grace_seconds)
+            if now - last_ping_time <= grace_period:
+                status = "ok"
+            else:
+                status = "overdue"
+        
+        # Add check to HTML
+        html_content += f"""
+    <div class="check">
+        <div class="status-dot {status}"></div>
+        <span>{name}</span>
+    </div>
+"""
+    
+    html_content += """
+</body>
+</html>
+"""
+    
+    return HTMLResponse(content=html_content, status_code=200)
 
 @app.post("/api/v1/admin/run-alerts")
 async def run_alerts():
